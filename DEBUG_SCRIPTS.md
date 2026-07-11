@@ -24,6 +24,7 @@ All use COM3 at 500000 baud.
 | `debug_bcm_id.py` | Tries multiple DIDs to identify BCM part/software number, then probes a short list of common routine IDs to find which ones the BCM recognizes | ~30s |
 | `debug_bcm_routine.py` | Tries routine 0x0205 and 0x0202 with different option byte payloads to find the correct message format (since 0x0205 returned "incorrect length") | ~30s |
 | `debug_bcm_probe_fast.py` | Scans likely JLR routine ID ranges (0x0100–0x03FF, 0x1000–0x10FF, 0x2000–0x21FF, 0xDD00–0xDFFF, 0xF000–0xF0FF, 0xFE00–0xFFFF) — finds valid routines without the multi-hour wait | ~5-10 min |
+| `debug_bcm_probe_safe.py` | Same ranges as fast probe but uses sub-function 0x03 (Request Results) instead of 0x01 (Start) — finds valid routine IDs without executing anything. Zero risk. | ~5-10 min |
 | `debug_bcm_probe_all.py` | Brute-force scans ALL 65,536 routine IDs (0x0000–0xFFFF) to find every routine the BCM supports | ~4-5 hours |
 
 ## What to run next
