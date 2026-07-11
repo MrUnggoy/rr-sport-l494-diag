@@ -249,22 +249,26 @@ def action_module_info(scanner: DiagnosticScanner):
 
 
 def action_bcm_reset_protected(scanner: DiagnosticScanner):
-    """BCM protected output diagnostic and DTC clear."""
-    print(f"\n  {Style.BRIGHT}BCM Protected Output Diagnostic{Style.RESET_ALL}")
-    print(f"  {'─'*45}")
-    print(f"  This investigates BCM protection faults (U1000/U3000) and")
-    print(f"  attempts a standard DTC clear. It does NOT blindly send")
-    print(f"  routine control commands — those require a verified routine ID.")
+    """BCM Enable Protected Outputs using verified routine 0x205E."""
+    print(f"\n  {Style.BRIGHT}BCM Enable Protected Outputs (Routine 0x205E){Style.RESET_ALL}")
+    print(f"  {'─'*50}")
+    print(f"  This executes the factory procedure to re-enable BCM outputs")
+    print(f"  that were shut down due to overcurrent (U1000-00).")
+    print()
+    print(f"  Source: JLR DTC U1000-00 official diagnosis procedure")
+    print(f"  Routine: 0x205E (Enable Protected Outputs)")
+    print(f"  Path in SDD: Service Functions > Body systems > Enable Protected Outputs")
     print()
     print(f"  The procedure will:")
-    print(f"    1. Verify BCM communication")
-    print(f"    2. Read BCM part number / software version")
-    print(f"    3. Read all BCM DTCs")
-    print(f"    4. Clear DTCs (standard service 0x14)")
-    print(f"    5. Re-scan to check if protection faults return")
+    print(f"    1. Verify BCM communication and identify it")
+    print(f"    2. Read DTCs to confirm U1000 is present")
+    print(f"    3. Start extended diagnostic session")
+    print(f"    4. Execute Routine Control 0x31 with routine ID 0x205E")
+    print(f"    5. Re-scan to verify protection DTCs cleared")
     print()
-    print_warning("If the underlying short circuit is not fixed, the fault")
-    print_warning("will return immediately after clearing.")
+    print_warning("IMPORTANT: The short circuit must be fixed FIRST!")
+    print_warning("If the fault still exists, the output will immediately trip again.")
+    print_warning("Ensure: Ignition ON, Engine OFF, battery well charged.")
     print()
     confirm = input(f"  Proceed? (y/n): ").strip().lower()
 
@@ -277,13 +281,13 @@ def action_bcm_reset_protected(scanner: DiagnosticScanner):
     def log_line(msg):
         print(f"  {msg}")
 
-    result = scanner.bcm_protected_output_diagnostic(log_callback=log_line)
+    result = scanner.reset_bcm_protected_outputs(log_callback=log_line)
 
     print_separator()
     if result.success:
-        print_success("Diagnostic procedure completed")
+        print_success("Enable Protected Outputs procedure completed")
     else:
-        print_error("Procedure could not complete fully")
+        print_error("Procedure did not complete successfully")
     print_separator()
 
 
@@ -455,7 +459,7 @@ def main_menu(scanner: DiagnosticScanner, elm: ELM327):
         print(f"  4. Clear faults on specific module")
         print(f"  5. Clear ALL faults (all modules)")
         print(f"  6. Read module info (part number/software)")
-        print(f"  7. {Fore.YELLOW}BCM Protected Output Diagnostic{Style.RESET_ALL} (U1000/U3000)")
+        print(f"  7. {Fore.YELLOW}BCM Enable Protected Outputs{Style.RESET_ALL} (routine 0x205E)")
         print(f"  8. Execute known routine (advanced)")
         print(f"  9. {Fore.MAGENTA}CAN Bus Sniffer{Style.RESET_ALL} (capture SDD traffic)")
         print(f"  0. Exit")

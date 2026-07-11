@@ -210,7 +210,163 @@ class DiagnosticScanner:
 
         return result
 
-    # --- BCM Protected Output Diagnostic ---
+    # --- BCM Protected Output Reset (Verified) ---
+
+    # Routine ID 0x205E: "Enable Protected Outputs"
+    # Source: JLR official DTC U1000-00 diagnostic procedure
+    # Location in SDD/Pathfinder: BCM → ECU Functions → Enable Protected Outputs
+    # Applies to: L494 14MY+, L405 14MY+, L538 14MY+, L550 15MY+, L462 17MY+, L560 18MY+
+    BCM_ENABLE_PROTECTED_OUTPUTS_ROUTINE = 0x205E
+
+    def reset_bcm_protected_outputs(self, log_callback=None) -> DiagResult:
+        """
+        Re-enable BCM protected outputs using verified routine ID 0x205E.
+        
+        This is the factory procedure documented in JLR DTC U1000-00 diagnosis:
+        "To re-enable the output circuits, perform the routine -
+         Enable Protected Outputs (205E)"
+        
+        Procedure:
+        1. Verify BCM is online and identify it
+        2. Read DTCs to confirm U1000-00 is present
+        3. Start extended diagnostic session
+        4. Execute Routine Control 0x31, Start (0x01), routine ID 0x205E
+        5. Re-scan to verify U1000-00 cleared
+        
+        IMPORTANT: Fix the underlying short circuit FIRST. If the short persists,
+        the BCM will immediately re-disable the output.
+        
+        Returns:
+            DiagResult with full procedure log.
+        """
+        from modules import get_module_by_name
+        import time
+
+        bcm = get_module_by_name("BCM")
+        if not bcm:
+            return DiagResult(success=False, message="BCM module not defined")
+
+        req_id = bcm.request_id
+        res_id = bcm.response_id
+        log_lines = []
+
+        def log(msg: str):
+            log_lines.append(msg)
+            if log_callback:
+                log_callback(msg)
+
+        # Step 1: Verify BCM responds
+        log(f"[1/6] Pinging BCM at 0x{req_id:03X}/0x{res_id:03X}...")
+        if not self.uds.ping_module(req_id, res_id):
+            log("  FAILED - BCM not responding")
+            return DiagResult(success=False,
+                              message="BCM not responding\n" + "\n".join(log_lines))
+        log("  OK - BCM online")
+
+        # Step 2: Identify BCM
+        log("[2/6] Reading BCM identification...")
+        info_result = self.uds.read_ecu_id(req_id, res_id)
+        if info_result.success and info_result.ecu_info:
+            info = info_result.ecu_info
+            if info.part_number:
+                log(f"  Part Number: {info.part_number}")
+            if info.software_version:
+                log(f"  Software:    {info.software_version}")
+        else:
+            log("  Could not read BCM identification (continuing anyway)")
+
+        # Step 3: Read DTCs to confirm U1000 is present
+        log("[3/6] Reading BCM fault codes...")
+        # Start session for DTC read
+        self.uds.start_diagnostic_session(req_id, res_id, DiagnosticSession.EXTENDED)
+        self.uds.tester_present(req_id, res_id)
+
+        dtc_result = self.uds.read_dtcs(req_id, res_id)
+        has_u1000 = False
+        if dtc_result.success:
+            log(f"  Found {len(dtc_result.dtcs)} DTC(s):")
+            for dtc in dtc_result.dtcs:
+                marker = " ← TARGET" if dtc.code.startswith("U1") else ""
+                log(f"    {dtc.code} [{dtc.status_text}]{marker}")
+                if dtc.code.startswith("U1"):
+                    has_u1000 = True
+            if not has_u1000:
+                log("  WARNING: No U1xxx protection DTC found.")
+                log("  The routine may still work, but the output may already be enabled.")
+        else:
+            log(f"  Could not read DTCs: {dtc_result.message}")
+            log("  Proceeding anyway...")
+
+        # Step 4: Start extended diagnostic session
+        log("[4/6] Starting extended diagnostic session...")
+        self.uds.tester_present(req_id, res_id)
+        session_result = self.uds.start_diagnostic_session(
+            req_id, res_id, DiagnosticSession.EXTENDED
+        )
+        if session_result.success:
+            log("  Extended session active")
+        else:
+            log(f"  Session response: {session_result.message}")
+            log("  Attempting routine anyway...")
+
+        # Step 5: Execute Enable Protected Outputs (0x205E)
+        log("[5/6] Executing routine 0x205E (Enable Protected Outputs)...")
+        self.uds.tester_present(req_id, res_id)
+
+        routine_result = self.uds.routine_control(
+            req_id, res_id,
+            sub_function=0x01,  # Start Routine
+            routine_id=self.BCM_ENABLE_PROTECTED_OUTPUTS_ROUTINE,
+        )
+
+        if routine_result.success:
+            log(f"  SUCCESS - Routine accepted!")
+            log(f"  Response: {routine_result.raw_response.hex().upper()}")
+        else:
+            log(f"  FAILED - {routine_result.message}")
+            if routine_result.raw_response:
+                log(f"  Raw response: {routine_result.raw_response.hex().upper()}")
+            log("")
+            log("  Possible reasons:")
+            log("  - Security access (0x27) may be required first")
+            log("  - BCM may need a specific session type")
+            log("  - The short circuit may still be present")
+            return DiagResult(success=False,
+                              message="\n".join(log_lines),
+                              raw_response=routine_result.raw_response or b"")
+
+        # Step 6: Wait and re-scan to verify
+        log("[6/6] Waiting 3 seconds, then re-scanning BCM...")
+        time.sleep(3)
+        self.uds.tester_present(req_id, res_id)
+
+        rescan_result = self.uds.read_dtcs(req_id, res_id)
+        if rescan_result.success:
+            u1_codes = [d for d in rescan_result.dtcs if d.code.startswith("U1")]
+            if u1_codes:
+                log(f"  U1xxx DTCs still present ({len(u1_codes)}):")
+                for dtc in u1_codes:
+                    log(f"    {dtc.code} [{dtc.status_text}]")
+                log("")
+                log("  The routine executed but protection DTCs remain.")
+                log("  Try: Turn ignition OFF for 30 seconds, then back ON.")
+                log("  If still present, the short circuit may not be fully repaired.")
+            else:
+                log("  No U1xxx protection DTCs found - outputs should be re-enabled!")
+                log("")
+                log("  NEXT STEPS:")
+                log("  1. Turn ignition OFF, wait 10 seconds, turn back ON")
+                log("  2. Test the affected circuit (tail light, turn signal, etc.)")
+                log("  3. Run for 30+ seconds to confirm no fault returns")
+        else:
+            log(f"  Re-scan failed: {rescan_result.message}")
+            log("  Cycle ignition and re-check manually")
+
+        log("")
+        log("  Routine 0x205E completed.")
+        return DiagResult(success=True,
+                          message="\n".join(log_lines),
+                          dtcs=rescan_result.dtcs if rescan_result.success else [])
 
     def bcm_protected_output_diagnostic(self, log_callback=None) -> DiagResult:
         """
