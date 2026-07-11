@@ -19,7 +19,7 @@ class ELM327Error(Exception):
 class ELM327:
     """Interface to an ELM327 OBD2 adapter over serial."""
 
-    def __init__(self, port: str, baudrate: int = 115200, timeout: float = 2.0):
+    def __init__(self, port: str, baudrate: int = 115200, timeout: float = 5.0):
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
@@ -69,8 +69,8 @@ class ELM327:
         if "OK" not in resp and "6" not in resp:
             # Try auto protocol
             self._send_command("ATSP0")
-        # Set timeout to ~200ms (multiply by 4ms: 50 * 4 = 200ms)
-        self._send_command("ATST50")
+        # Set timeout to ~1000ms (multiply by 4ms: FA hex = 250 * 4 = 1000ms)
+        self._send_command("ATSTFA")
         # Allow long messages (for multi-frame ISO-TP)
         self._send_command("ATAL")
         # Set CAN auto-formatting on
@@ -138,6 +138,9 @@ class ELM327:
             return []
 
         responses = []
+        multi_frame_data = []
+        is_multi_frame = False
+
         for line in raw_response.split("\r"):
             line = line.strip()
             if not line:
@@ -148,14 +151,31 @@ class ELM327:
                 continue
             if line.startswith("SEARCHING"):
                 continue
-            # Try to parse as hex bytes
+
             cleaned = line.replace(" ", "")
-            try:
-                response_bytes = bytes.fromhex(cleaned)
-                responses.append(response_bytes)
-            except ValueError:
-                # Not hex data, skip
-                continue
+
+            # Check for multi-frame ISO-TP format: "N:HEXDATA" where N is 0-F
+            # e.g., "0:59027F900D64", "1:40023C12402299", "A:13400353134003"
+            if len(cleaned) > 2 and cleaned[1] == ':' and cleaned[0] in "0123456789ABCDEFabcdef":
+                is_multi_frame = True
+                hex_part = cleaned[2:]  # Strip the "N:" prefix
+                try:
+                    multi_frame_data.append(bytes.fromhex(hex_part))
+                except ValueError:
+                    continue
+            else:
+                # Try to parse as single-frame hex bytes
+                try:
+                    response_bytes = bytes.fromhex(cleaned)
+                    responses.append(response_bytes)
+                except ValueError:
+                    # Not hex data, skip
+                    continue
+
+        # If we got multi-frame data, concatenate it into one response
+        if is_multi_frame and multi_frame_data:
+            assembled = b"".join(multi_frame_data)
+            responses.append(assembled)
 
         return responses
 

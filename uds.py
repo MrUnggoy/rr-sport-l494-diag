@@ -184,9 +184,22 @@ class UDSClient:
 
     def _send(self, request_id: int, response_id: int,
               data: bytes, timeout: float | None = None) -> bytes | None:
-        """Send UDS request and return response."""
+        """Send UDS request and return response, with NRC 0x78 retry."""
+        import time
         self._setup_ecu(request_id, response_id)
-        return self.elm.send_and_receive(data, response_id, timeout=timeout)
+        response = self.elm.send_and_receive(data, response_id, timeout=timeout)
+
+        # Handle NRC 0x78 (Response Pending) - ECU needs more processing time
+        # The ECU is saying "I'm working on it, wait." Keep waiting and re-reading.
+        retries = 0
+        while (response and len(response) >= 3 and
+               response[0] == 0x7F and response[2] == 0x78 and
+               retries < 10):
+            time.sleep(3.0)
+            response = self.elm.send_and_receive(data, response_id, timeout=10.0)
+            retries += 1
+
+        return response
 
     def _is_positive_response(self, request_sid: int, response: bytes) -> bool:
         """Check if response is a positive response to our request."""
@@ -604,12 +617,12 @@ class UDSClient:
         Uses TesterPresent as a lightweight probe.
         """
         data = bytes([UDSService.TESTER_PRESENT, 0x00])
-        response = self._send(request_id, response_id, data, timeout=2.0)
+        response = self._send(request_id, response_id, data, timeout=3.0)
         if response and self._is_positive_response(UDSService.TESTER_PRESENT, response):
             return True
         # Some modules respond to default session control
         data = bytes([UDSService.DIAGNOSTIC_SESSION_CONTROL, DiagnosticSession.DEFAULT])
-        response = self._send(request_id, response_id, data, timeout=2.0)
+        response = self._send(request_id, response_id, data, timeout=3.0)
         return response is not None and self._is_positive_response(
             UDSService.DIAGNOSTIC_SESSION_CONTROL, response
         )
