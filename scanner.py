@@ -335,8 +335,17 @@ class DiagnosticScanner:
                               message="\n".join(log_lines),
                               raw_response=routine_result.raw_response or b"")
 
-        # Step 6: Wait and re-scan to verify
-        log("[6/6] Waiting 3 seconds, then re-scanning BCM...")
+        # Step 6: Clear DTCs (per JLR procedure: routine, then clear, then self-test)
+        log("[6/7] Clearing DTCs after routine...")
+        self.uds.tester_present(req_id, res_id)
+        clear_result = self.uds.clear_dtcs(req_id, res_id)
+        if clear_result.success:
+            log("  DTCs cleared")
+        else:
+            log(f"  DTC clear: {clear_result.message}")
+
+        # Step 7: Wait and re-scan to verify
+        log("[7/7] Waiting 3 seconds, then re-scanning BCM...")
         time.sleep(3)
         self.uds.tester_present(req_id, res_id)
 
