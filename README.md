@@ -9,7 +9,11 @@ with multiple ECUs via the OBD2 port using UDS (Unified Diagnostic Services) pro
   Air Suspension, Instrument Cluster, Parking Aid, Steering, ABS/DSC, and more
 - **Read DTCs** - Read Diagnostic Trouble Codes from any supported module
 - **Clear DTCs** - Reset/clear fault codes on individual modules or all at once
-- **Freeze frame data** - Read snapshot data associated with stored DTCs
+- **BCM Protected Output Reset** - Re-enable solid-state drivers disabled by overcurrent
+  protection (U1000/U3000 faults — turn signals, headlamps, tail lamps)
+- **Routine Control (0x31)** - Execute ECU routines for advanced reset functions
+- **Security Access (0x27)** - Seed/key authentication for protected operations
+- **ECU Reset (0x11)** - Soft/hard reset individual modules
 - **Module identification** - Read ECU part numbers and software versions
 - **Interactive CLI** - Easy-to-use terminal interface
 
@@ -80,9 +84,26 @@ python main.py --list-ports
   operation. Always ensure the vehicle is in a safe state (parked, ignition on/engine off
   for clearing codes).
 - **This tool does NOT replace professional diagnostic equipment** like JLR SDD/Pathfinder.
-  It cannot perform module programming, calibration, or advanced functions.
+  It cannot perform module programming, calibration, or CCF configuration.
 - **Clearing codes does not fix underlying problems.** If a fault returns after clearing,
   the root cause needs to be addressed.
+
+## BCM Protected Output Reset (U1000 / U3000)
+
+The BCM uses FET (solid-state) drivers for lighting circuits. When it detects overcurrent
+(e.g., a short in a taillight), it disables that output and sets U1000 ("Solid State Driver
+Protection Activated"). A standard DTC clear alone may not re-enable the output.
+
+Menu option 7 performs a multi-step reset procedure:
+
+1. Opens an extended diagnostic session with the BCM
+2. Clears all stored DTCs
+3. Attempts UDS Routine Control (0x31) with known JLR routine IDs
+4. Sends an ECU soft reset to force output driver re-initialization
+5. Falls back to hard reset if needed
+
+**Before running this**: fix the underlying wiring fault. If the short still exists,
+the output will trip again immediately.
 
 ## License
 
