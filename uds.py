@@ -184,22 +184,36 @@ class UDSClient:
 
     def _send(self, request_id: int, response_id: int,
               data: bytes, timeout: float | None = None) -> bytes | None:
-        """Send UDS request and return response, with NRC 0x78 retry."""
+        """Send UDS request and return response, with NRC 0x78 handling."""
         import time
         self._setup_ecu(request_id, response_id)
-        response = self.elm.send_and_receive(data, response_id, timeout=timeout)
 
-        # Handle NRC 0x78 (Response Pending) - ECU needs more processing time
-        # The ECU is saying "I'm working on it, wait." Keep waiting and re-reading.
+        # Use send_raw to get ALL response lines (handles multi-frame too)
+        responses = self.elm.send_raw(data, timeout=timeout)
+
+        if not responses:
+            return None
+
+        # Check responses — skip any NRC 0x78 (Response Pending), return first real one
+        for resp in responses:
+            if len(resp) >= 3 and resp[0] == 0x7F and resp[2] == 0x78:
+                continue  # Skip "Response Pending"
+            return resp
+
+        # All responses were 0x78 pending — wait and re-read
         retries = 0
-        while (response and len(response) >= 3 and
-               response[0] == 0x7F and response[2] == 0x78 and
-               retries < 10):
+        while retries < 10:
             time.sleep(3.0)
-            response = self.elm.send_and_receive(data, response_id, timeout=10.0)
+            responses = self.elm.send_raw(data, timeout=10.0)
+            if responses:
+                for resp in responses:
+                    if len(resp) >= 3 and resp[0] == 0x7F and resp[2] == 0x78:
+                        continue
+                    return resp
             retries += 1
 
-        return response
+        # Give up — return the last response we got (the 0x78)
+        return responses[0] if responses else None
 
     def _is_positive_response(self, request_sid: int, response: bytes) -> bool:
         """Check if response is a positive response to our request."""
