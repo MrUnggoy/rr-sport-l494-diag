@@ -11,8 +11,10 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import time
+from datetime import datetime
 
 try:
     from colorama import init as colorama_init, Fore, Style
@@ -27,6 +29,7 @@ except ImportError:
 from elm327 import ELM327, ELM327Error
 from modules import MODULES, get_module_by_name, get_all_module_names
 from scanner import DiagnosticScanner, ModuleScanResult
+from sniffer import CANSniffer, CANFrame
 from uds import DTC
 
 
@@ -329,9 +332,120 @@ def action_execute_routine(scanner: DiagnosticScanner):
     print_separator()
 
 
+def action_can_sniffer(elm: ELM327):
+    """CAN bus passive sniffer for capturing diagnostic traffic."""
+    print(f"\n  {Style.BRIGHT}CAN Bus Sniffer (Passive Monitor){Style.RESET_ALL}")
+    print(f"  {'─'*45}")
+    print(f"  Captures CAN frames flowing between another diagnostic tool")
+    print(f"  (e.g., JLR SDD/Pathfinder) and the vehicle's ECUs.")
+    print()
+    print(f"  Setup:")
+    print(f"  - Y-splitter on OBD2 port: SDD tool + your OHP adapter")
+    print(f"  - Your adapter passively listens (does not transmit)")
+    print(f"  - Start capture BEFORE running the SDD procedure")
+    print()
+    print(f"  Filter options:")
+    print(f"  1. Capture ALL diagnostic traffic (0x700-0x7FF)")
+    print(f"  2. Capture BCM only (0x720 / 0x728)")
+    print(f"  3. Capture specific ECU pair")
+    print()
+
+    choice = input(f"  Filter [{Fore.CYAN}1-3{Style.RESET_ALL}]: ").strip()
+
+    filter_id = None
+    filter_mask = None
+
+    if choice == "2":
+        filter_id = 0x720
+        filter_mask = 0x7F0  # Matches 0x720-0x72F (covers request + response)
+    elif choice == "3":
+        id_hex = input(f"  Enter CAN ID to filter (hex, e.g. 720): ").strip()
+        try:
+            filter_id = int(id_hex, 16)
+            filter_mask = 0x7F0  # Match that ECU pair
+        except ValueError:
+            print_error("Invalid hex value, capturing all")
+            filter_id = None
+
+    duration_str = input(f"  Capture duration in seconds [60]: ").strip()
+    try:
+        duration = float(duration_str) if duration_str else 60.0
+    except ValueError:
+        duration = 60.0
+
+    print()
+    print_info(f"Starting capture for {duration:.0f} seconds...")
+    print_info("Press Ctrl+C to stop early")
+    print_separator()
+    print(f"  {'Timestamp':>10s}  {'CAN ID':>6s}  Len  {'Data':<24s}  Direction")
+    print(f"  {'─'*70}")
+
+    frame_count = [0]
+
+    def on_frame(frame: CANFrame):
+        # Only display diagnostic-range frames
+        if frame.is_diagnostic:
+            frame_count[0] += 1
+            print(f"  {frame.timestamp:10.3f}  {frame.id_hex}  "
+                  f"[{len(frame.data)}]  {frame.data_hex:<24s}  "
+                  f"{frame.direction}")
+
+    sniffer = CANSniffer(elm)
+    try:
+        frames = sniffer.start_monitor(
+            filter_id=filter_id,
+            filter_mask=filter_mask,
+            duration=duration,
+            callback=on_frame,
+        )
+    except ELM327Error as e:
+        print_error(f"Sniffer error: {e}")
+        return
+
+    print_separator()
+    diag_frames = sniffer.get_diagnostic_frames()
+    print_info(f"Captured {len(frames)} total frames, "
+               f"{len(diag_frames)} in diagnostic range")
+
+    # Analyze for routine control commands
+    routines = sniffer.analyze_routine_control()
+    if routines:
+        print()
+        print(f"  {Style.BRIGHT}Routine Control (0x31) commands found:{Style.RESET_ALL}")
+        for r in routines:
+            print(f"    {r['timestamp']:.3f}s  Target: {r['target_id']}  "
+                  f"Routine: {r['routine_id']}  Sub: 0x{r['sub_function']:02X}  "
+                  f"{r['direction']}")
+            if r['option_record']:
+                print(f"      Option bytes: {r['option_record']}")
+        print()
+        print_success("These are the routine IDs you need!")
+        print_info("Use menu option 8 to replay a captured routine.")
+
+    # Save to file
+    if diag_frames:
+        print()
+        save = input(f"  Save capture to file? (y/n): ").strip().lower()
+        if save == 'y':
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"can_capture_{timestamp}.log"
+            filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    filename)
+            sniffer.save_log(filepath, diag_frames)
+            print_success(f"Saved {len(diag_frames)} frames to {filename}")
+
+            # Also save BCM-specific if there are BCM frames
+            bcm_count = sniffer.save_bcm_session(
+                filepath.replace(".log", "_bcm.log")
+            )
+            if bcm_count > 0:
+                print_success(f"Saved {bcm_count} BCM frames to "
+                              f"{filename.replace('.log', '_bcm.log')}")
+
+
 # --- Main Menu ---
 
-def main_menu(scanner: DiagnosticScanner):
+def main_menu(scanner: DiagnosticScanner, elm: ELM327):
     """Interactive main menu loop."""
     while True:
         print(f"\n  {Style.BRIGHT}Main Menu:{Style.RESET_ALL}")
@@ -343,10 +457,11 @@ def main_menu(scanner: DiagnosticScanner):
         print(f"  6. Read module info (part number/software)")
         print(f"  7. {Fore.YELLOW}BCM Protected Output Diagnostic{Style.RESET_ALL} (U1000/U3000)")
         print(f"  8. Execute known routine (advanced)")
+        print(f"  9. {Fore.MAGENTA}CAN Bus Sniffer{Style.RESET_ALL} (capture SDD traffic)")
         print(f"  0. Exit")
         print()
 
-        choice = input(f"  Select [{Fore.CYAN}0-8{Style.RESET_ALL}]: ").strip()
+        choice = input(f"  Select [{Fore.CYAN}0-9{Style.RESET_ALL}]: ").strip()
 
         try:
             if choice == "1":
@@ -365,6 +480,8 @@ def main_menu(scanner: DiagnosticScanner):
                 action_bcm_reset_protected(scanner)
             elif choice == "8":
                 action_execute_routine(scanner)
+            elif choice == "9":
+                action_can_sniffer(elm)
             elif choice == "0":
                 break
             else:
@@ -454,7 +571,7 @@ def main():
     print_separator()
 
     try:
-        main_menu(scanner)
+        main_menu(scanner, elm)
     except KeyboardInterrupt:
         print(f"\n\n  Interrupted")
     finally:

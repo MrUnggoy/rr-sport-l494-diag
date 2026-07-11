@@ -64,6 +64,7 @@ python main.py --list-ports
 | 6 | Read module info | Get part number / software version from a module |
 | 7 | BCM Protected Output Diagnostic | Investigate U1000/U3000 faults (see below) |
 | 8 | Execute known routine | Send a verified routine ID to any module (advanced) |
+| 9 | CAN Bus Sniffer | Passive capture of diagnostic traffic (see below) |
 
 ## Supported Modules (2014 Range Rover Sport L494)
 
@@ -119,6 +120,55 @@ This tool will NOT:
 - Claim a DTC clear equals a protected output reset
 - Send ECU reset commands as a speculative workaround
 - Report success without a confirmed positive UDS response
+
+## CAN Bus Sniffer (Menu Option 9)
+
+Passive monitoring mode that captures CAN traffic between another diagnostic tool
+(JLR SDD/Pathfinder, IIDTool, etc.) and the vehicle. This is how you obtain the
+exact routine ID needed for "Enable Protected Outputs."
+
+### Setup
+
+1. Get an OBD2 Y-splitter cable
+2. Plug the shop's SDD interface into one leg, your OHP adapter into the other
+3. Start the sniffer (option 9) BEFORE the tech runs the procedure
+4. Select BCM filter (option 2) to reduce noise
+5. The tech runs "Enable Protected Outputs" in SDD
+6. Stop the capture — the tool automatically identifies Routine Control (0x31)
+   commands and shows you the exact routine ID and parameters
+
+### What it captures
+
+- All CAN frames in the diagnostic range (0x700-0x7FF)
+- Timestamps for each frame
+- Direction detection (tester to ECU vs ECU to tester)
+- Automatic identification of Routine Control (0x31) commands
+- Save to timestamped log files for later analysis
+
+### After capture
+
+The sniffer displays any 0x31 Routine Control commands it finds, including:
+- Target ECU CAN ID
+- Routine ID (the 2-byte hex value you need)
+- Sub-function (start/stop/results)
+- Option record bytes (if any)
+
+Take the routine ID from the capture and use it in menu option 8 to replay the
+exact same command yourself, without needing the expensive tool again.
+
+## JLR SSM74176 Reference
+
+This tool addresses the procedure documented in JLR Special Service Message SSM74176:
+"Body Control Module Outputs Not Functioning with DTC U1000-00 stored."
+
+Applies to: L494 (Range Rover Sport) 14MY onwards, L405, L538, L550, L462, L560.
+
+The official SDD procedure is: Service Functions > "Body systems - Enable Protected Outputs"
+
+The official Pathfinder path is: ECU Diagnostics > BCM > ECU Functions > "Enable Protected Outputs"
+
+Both execute a UDS Routine Control command underneath. This tool provides the means to
+capture and replay that command without a dealer subscription.
 
 ### UDS services available in the code
 
