@@ -432,6 +432,167 @@ class UDSClient:
             return DiagResult(success=False,
                               message="Could not read ECU identification")
 
+    # --- Routine Control ---
+
+    def routine_control(self, request_id: int, response_id: int,
+                        sub_function: int, routine_id: int,
+                        option_record: bytes = b"") -> DiagResult:
+        """
+        Execute a Routine Control (0x31) command on an ECU.
+        
+        Args:
+            request_id: ECU request CAN ID.
+            response_id: ECU response CAN ID.
+            sub_function: 0x01=Start, 0x02=Stop, 0x03=RequestResults
+            routine_id: 2-byte routine identifier.
+            option_record: Optional routine option data bytes.
+            
+        Returns:
+            DiagResult indicating success or failure.
+        """
+        data = bytes([
+            0x31,  # RoutineControl
+            sub_function,
+            (routine_id >> 8) & 0xFF,
+            routine_id & 0xFF,
+        ]) + option_record
+
+        response = self._send(request_id, response_id, data, timeout=5.0)
+
+        if response is None:
+            return DiagResult(success=False, message="No response from ECU")
+
+        if self._is_positive_response(0x31, response):
+            return DiagResult(success=True, message="Routine executed successfully",
+                              raw_response=response)
+
+        is_neg, nrc = self._is_negative_response(response)
+        if is_neg:
+            msg = f"Routine rejected: {self._get_nrc_text(nrc)}"
+            if nrc == NegativeResponseCode.SECURITY_ACCESS_DENIED:
+                msg += " (security access required first)"
+            elif nrc == NegativeResponseCode.CONDITIONS_NOT_CORRECT:
+                msg += " (preconditions not met - check ignition state)"
+            elif nrc == NegativeResponseCode.REQUEST_OUT_OF_RANGE:
+                msg += " (routine ID not supported by this ECU)"
+            return DiagResult(success=False, message=msg, raw_response=response)
+
+        return DiagResult(success=False, message="Unexpected response",
+                          raw_response=response)
+
+    # --- Security Access ---
+
+    def security_access_request_seed(self, request_id: int, response_id: int,
+                                      access_level: int = 0x01) -> DiagResult:
+        """
+        Request a security seed from the ECU (step 1 of security access).
+        
+        Args:
+            request_id: ECU request CAN ID.
+            response_id: ECU response CAN ID.
+            access_level: Security access level (odd number: 0x01, 0x03, etc.)
+            
+        Returns:
+            DiagResult with raw_response containing the seed bytes.
+        """
+        data = bytes([UDSService.SECURITY_ACCESS, access_level])
+        response = self._send(request_id, response_id, data, timeout=3.0)
+
+        if response is None:
+            return DiagResult(success=False, message="No response from ECU")
+
+        if self._is_positive_response(UDSService.SECURITY_ACCESS, response):
+            # Response: [67] [access_level] [seed bytes...]
+            if len(response) > 2:
+                seed = response[2:]
+                if seed == b'\x00' * len(seed):
+                    return DiagResult(success=True,
+                                      message="Already unlocked (seed=0)",
+                                      raw_response=response)
+                return DiagResult(success=True,
+                                  message=f"Seed received: {seed.hex().upper()}",
+                                  raw_response=response)
+            return DiagResult(success=True, message="Seed received",
+                              raw_response=response)
+
+        is_neg, nrc = self._is_negative_response(response)
+        if is_neg:
+            return DiagResult(success=False,
+                              message=f"Security access denied: {self._get_nrc_text(nrc)}",
+                              raw_response=response)
+
+        return DiagResult(success=False, message="Unexpected response",
+                          raw_response=response)
+
+    def security_access_send_key(self, request_id: int, response_id: int,
+                                  access_level: int, key: bytes) -> DiagResult:
+        """
+        Send a security key to the ECU (step 2 of security access).
+        
+        Args:
+            request_id: ECU request CAN ID.
+            response_id: ECU response CAN ID.
+            access_level: Security access level + 1 (even number: 0x02, 0x04, etc.)
+            key: Computed key bytes.
+            
+        Returns:
+            DiagResult indicating if the ECU accepted the key.
+        """
+        data = bytes([UDSService.SECURITY_ACCESS, access_level]) + key
+        response = self._send(request_id, response_id, data, timeout=3.0)
+
+        if response is None:
+            return DiagResult(success=False, message="No response from ECU")
+
+        if self._is_positive_response(UDSService.SECURITY_ACCESS, response):
+            return DiagResult(success=True, message="Security access granted",
+                              raw_response=response)
+
+        is_neg, nrc = self._is_negative_response(response)
+        if is_neg:
+            return DiagResult(success=False,
+                              message=f"Key rejected: {self._get_nrc_text(nrc)}",
+                              raw_response=response)
+
+        return DiagResult(success=False, message="Unexpected response",
+                          raw_response=response)
+
+    # --- ECU Reset ---
+
+    def ecu_reset(self, request_id: int, response_id: int,
+                  reset_type: int = 0x01) -> DiagResult:
+        """
+        Request an ECU reset.
+        
+        Args:
+            request_id: ECU request CAN ID.
+            response_id: ECU response CAN ID.
+            reset_type: 0x01=Hard reset, 0x02=Key off/on, 0x03=Soft reset
+            
+        Returns:
+            DiagResult indicating success or failure.
+        """
+        data = bytes([UDSService.ECU_RESET, reset_type])
+        response = self._send(request_id, response_id, data, timeout=5.0)
+
+        if response is None:
+            # Some ECUs reset immediately without responding
+            return DiagResult(success=True,
+                              message="Reset sent (no response - ECU may have restarted)")
+
+        if self._is_positive_response(UDSService.ECU_RESET, response):
+            return DiagResult(success=True, message="ECU reset successful",
+                              raw_response=response)
+
+        is_neg, nrc = self._is_negative_response(response)
+        if is_neg:
+            return DiagResult(success=False,
+                              message=f"Reset rejected: {self._get_nrc_text(nrc)}",
+                              raw_response=response)
+
+        return DiagResult(success=False, message="Unexpected response",
+                          raw_response=response)
+
     # --- Module Presence Check ---
 
     def ping_module(self, request_id: int, response_id: int) -> bool:

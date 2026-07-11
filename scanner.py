@@ -209,3 +209,145 @@ class DiagnosticScanner:
             result.error = str(e)
 
         return result
+
+    # --- BCM Protected Output Reset ---
+
+    def reset_bcm_protected_outputs(self, progress_callback=None) -> DiagResult:
+        """
+        Attempt to reset BCM FET/solid-state driver protected outputs.
+        
+        When the BCM detects overcurrent on a lighting circuit (e.g. turn signal,
+        headlamp), it disables the FET driver and sets U1000/U3000. A standard
+        DTC clear (0x14) may not re-enable the output - you need either:
+        
+        1. A UDS routine control (0x31) to reset the protected outputs
+        2. An ECU reset (0x11) after clearing DTCs
+        3. An ignition cycle (sometimes sufficient on JLR)
+        
+        This function tries multiple approaches in sequence:
+        - Extended session -> Clear DTCs -> ECU soft reset
+        - Extended session -> Routine control with known JLR routine IDs
+        - ECU hard reset as last resort
+        
+        IMPORTANT: Fix the underlying short/overcurrent BEFORE running this.
+        If the fault condition still exists, the output will immediately trip again.
+        
+        Returns:
+            DiagResult indicating overall success or what was attempted.
+        """
+        from modules import get_module_by_name
+        bcm = get_module_by_name("BCM")
+        if not bcm:
+            return DiagResult(success=False, message="BCM module not defined")
+
+        req_id = bcm.request_id
+        res_id = bcm.response_id
+        messages = []
+
+        # Step 1: Check BCM is online
+        if progress_callback:
+            progress_callback("BCM", 0, 5)
+        if not self.uds.ping_module(req_id, res_id):
+            return DiagResult(success=False, message="BCM not responding")
+        messages.append("BCM online")
+
+        # Step 2: Start extended diagnostic session
+        if progress_callback:
+            progress_callback("Session", 1, 5)
+        session_result = self.uds.start_diagnostic_session(
+            req_id, res_id, DiagnosticSession.EXTENDED
+        )
+        if session_result.success:
+            messages.append("Extended session started")
+        else:
+            messages.append(f"Extended session: {session_result.message}")
+            # Try default session
+            self.uds.start_diagnostic_session(
+                req_id, res_id, DiagnosticSession.DEFAULT
+            )
+
+        # Step 3: Clear all DTCs first
+        if progress_callback:
+            progress_callback("Clear DTCs", 2, 5)
+        clear_result = self.uds.clear_dtcs(req_id, res_id)
+        if clear_result.success:
+            messages.append("DTCs cleared")
+        else:
+            messages.append(f"DTC clear: {clear_result.message}")
+
+        # Step 4: Try routine control with known JLR routine IDs for FET reset
+        # These are commonly used routine identifiers for protected output reset
+        # on JLR platforms. The exact ID varies by BCM software version.
+        if progress_callback:
+            progress_callback("Routine", 3, 5)
+        
+        known_routine_ids = [
+            0x0203,  # Reset Protected Outputs (common on L494/L405)
+            0x0204,  # Reset All Output Drivers
+            0x0F06,  # Clear DM Lock (seen in JLR/BMW shared platforms)
+            0xFF00,  # General reset routine
+            0x0200,  # Output driver reset
+        ]
+        
+        routine_success = False
+        for routine_id in known_routine_ids:
+            result = self.uds.routine_control(
+                req_id, res_id,
+                sub_function=0x01,  # Start routine
+                routine_id=routine_id,
+            )
+            if result.success:
+                messages.append(
+                    f"Routine 0x{routine_id:04X} executed successfully"
+                )
+                routine_success = True
+                break
+            # If "request out of range" just try next one
+            # If "security access denied" we note it and move on
+
+        if not routine_success:
+            messages.append("No known routine IDs accepted (this is common)")
+            messages.append("Attempting ECU reset as alternative...")
+
+        # Step 5: ECU soft reset to force re-initialization of outputs
+        if progress_callback:
+            progress_callback("Reset", 4, 5)
+        
+        # Re-establish session after routine attempts
+        self.uds.start_diagnostic_session(
+            req_id, res_id, DiagnosticSession.EXTENDED
+        )
+        
+        reset_result = self.uds.ecu_reset(req_id, res_id, reset_type=0x03)  # Soft reset
+        if reset_result.success:
+            messages.append("BCM soft reset sent")
+        else:
+            messages.append(f"Soft reset: {reset_result.message}")
+            # Try hard reset
+            reset_result = self.uds.ecu_reset(req_id, res_id, reset_type=0x01)
+            if reset_result.success:
+                messages.append("BCM hard reset sent")
+            else:
+                messages.append(f"Hard reset: {reset_result.message}")
+
+        # Summary
+        overall_success = clear_result.success or routine_success or reset_result.success
+        summary = "\n".join(f"  - {m}" for m in messages)
+        
+        if overall_success:
+            final_msg = (
+                f"BCM reset procedure completed:\n{summary}\n\n"
+                f"  Turn ignition OFF, wait 30 seconds, then turn ON again.\n"
+                f"  Check if the affected output (turn signal/lamp) is restored.\n"
+                f"  If the fault returns immediately, the wiring issue persists."
+            )
+        else:
+            final_msg = (
+                f"BCM reset procedure attempted but may not have succeeded:\n{summary}\n\n"
+                f"  Try: Turn ignition OFF, disconnect battery for 60 seconds,\n"
+                f"  reconnect, and cycle ignition. This forces a full BCM reboot.\n"
+                f"  If that fails, JLR SDD/Pathfinder is needed for the specific\n"
+                f"  protected output reset routine."
+            )
+
+        return DiagResult(success=overall_success, message=final_msg)

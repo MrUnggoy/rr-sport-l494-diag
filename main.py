@@ -245,6 +245,38 @@ def action_module_info(scanner: DiagnosticScanner):
     print_separator()
 
 
+def action_bcm_reset_protected(scanner: DiagnosticScanner):
+    """Reset BCM protected outputs (FET/solid-state driver reset)."""
+    print(f"\n  {Style.BRIGHT}BCM Protected Output Reset{Style.RESET_ALL}")
+    print(f"  {'─'*40}")
+    print(f"  This attempts to re-enable BCM outputs that were shut down")
+    print(f"  due to overcurrent detection (U1000 / U3000 fault codes).")
+    print(f"  Common for: turn signals, headlamps, tail lamps, fog lamps.")
+    print()
+    print_warning("IMPORTANT: Fix the wiring fault FIRST!")
+    print_warning("If a short circuit still exists, the output will")
+    print_warning("trip again immediately after reset.")
+    print()
+    print_warning("Ensure: Ignition ON, Engine OFF")
+    confirm = input(f"  Proceed with BCM reset? (y/n): ").strip().lower()
+
+    if confirm != 'y':
+        print_info("Cancelled")
+        return
+
+    print()
+    result = scanner.reset_bcm_protected_outputs(progress_callback=progress_dot)
+    print("\r" + " " * 50 + "\r")
+
+    print_separator()
+    if result.success:
+        print_success("Procedure completed")
+    else:
+        print_warning("Procedure completed with issues")
+    print(f"\n{result.message}")
+    print_separator()
+
+
 # --- Main Menu ---
 
 def main_menu(scanner: DiagnosticScanner):
@@ -257,10 +289,11 @@ def main_menu(scanner: DiagnosticScanner):
         print(f"  4. Clear faults on specific module")
         print(f"  5. Clear ALL faults (all modules)")
         print(f"  6. Read module info (part number/software)")
+        print(f"  7. {Fore.YELLOW}BCM Reset Protected Outputs{Style.RESET_ALL} (turn signal/lamp fix)")
         print(f"  0. Exit")
         print()
 
-        choice = input(f"  Select [{Fore.CYAN}0-6{Style.RESET_ALL}]: ").strip()
+        choice = input(f"  Select [{Fore.CYAN}0-7{Style.RESET_ALL}]: ").strip()
 
         try:
             if choice == "1":
@@ -275,6 +308,8 @@ def main_menu(scanner: DiagnosticScanner):
                 action_clear_all(scanner)
             elif choice == "6":
                 action_module_info(scanner)
+            elif choice == "7":
+                action_bcm_reset_protected(scanner)
             elif choice == "0":
                 break
             else:
