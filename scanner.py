@@ -210,144 +210,254 @@ class DiagnosticScanner:
 
         return result
 
-    # --- BCM Protected Output Reset ---
+    # --- BCM Protected Output Diagnostic ---
 
-    def reset_bcm_protected_outputs(self, progress_callback=None) -> DiagResult:
+    def bcm_protected_output_diagnostic(self, log_callback=None) -> DiagResult:
         """
-        Attempt to reset BCM FET/solid-state driver protected outputs.
+        Investigate BCM protected output faults (U1000/U3000).
         
-        When the BCM detects overcurrent on a lighting circuit (e.g. turn signal,
-        headlamp), it disables the FET driver and sets U1000/U3000. A standard
-        DTC clear (0x14) may not re-enable the output - you need either:
+        This procedure does NOT blindly attempt routine controls. Instead it:
+        1. Verifies BCM is online and identifies it (part number / SW version)
+        2. Reads all BCM DTCs and checks for protection-related codes
+        3. Reports findings so the user can make an informed decision
+        4. Offers a standard DTC clear (0x14) ONLY — clearly labeled as such
+        5. Re-scans after clear to check if the fault returns immediately
         
-        1. A UDS routine control (0x31) to reset the protected outputs
-        2. An ECU reset (0x11) after clearing DTCs
-        3. An ignition cycle (sometimes sufficient on JLR)
+        For actual protected output re-enable via Routine Control (0x31),
+        the correct routine ID must be determined from JLR service documentation
+        or captured from an SDD/Pathfinder session for your specific BCM software.
         
-        This function tries multiple approaches in sequence:
-        - Extended session -> Clear DTCs -> ECU soft reset
-        - Extended session -> Routine control with known JLR routine IDs
-        - ECU hard reset as last resort
-        
-        IMPORTANT: Fix the underlying short/overcurrent BEFORE running this.
-        If the fault condition still exists, the output will immediately trip again.
+        This tool can then execute that known routine — see execute_known_routine().
         
         Returns:
-            DiagResult indicating overall success or what was attempted.
+            DiagResult with detailed log of everything attempted and observed.
         """
         from modules import get_module_by_name
+        import time
+
         bcm = get_module_by_name("BCM")
         if not bcm:
             return DiagResult(success=False, message="BCM module not defined")
 
         req_id = bcm.request_id
         res_id = bcm.response_id
-        messages = []
+        log_lines = []
 
-        # Step 1: Check BCM is online
-        if progress_callback:
-            progress_callback("BCM", 0, 5)
+        def log(msg: str):
+            log_lines.append(msg)
+            if log_callback:
+                log_callback(msg)
+
+        # --- Step 1: Verify BCM is online ---
+        log(f"[1/5] Pinging BCM at 0x{req_id:03X}/0x{res_id:03X}...")
         if not self.uds.ping_module(req_id, res_id):
-            return DiagResult(success=False, message="BCM not responding")
-        messages.append("BCM online")
+            log("  FAILED - BCM not responding")
+            log("  Check: Ignition ON? Adapter connected? Correct CAN bus (HS)?")
+            return DiagResult(
+                success=False,
+                message="BCM not responding\n" + "\n".join(log_lines)
+            )
+        log("  OK - BCM responding")
 
-        # Step 2: Start extended diagnostic session
-        if progress_callback:
-            progress_callback("Session", 1, 5)
+        # --- Step 2: Identify BCM ---
+        log(f"[2/5] Reading BCM identification...")
+        info_result = self.uds.read_ecu_id(req_id, res_id)
+        if info_result.success and info_result.ecu_info:
+            info = info_result.ecu_info
+            if info.part_number:
+                log(f"  Part Number: {info.part_number}")
+            if info.software_version:
+                log(f"  Software:    {info.software_version}")
+            if info.hardware_version:
+                log(f"  Hardware:    {info.hardware_version}")
+            if not info.part_number and not info.software_version:
+                log("  Could not read identification DIDs")
+        else:
+            log("  Could not read identification (some DIDs may not be supported)")
+
+        # --- Step 3: Start extended session and read DTCs ---
+        log(f"[3/5] Reading BCM fault codes...")
         session_result = self.uds.start_diagnostic_session(
             req_id, res_id, DiagnosticSession.EXTENDED
         )
         if session_result.success:
-            messages.append("Extended session started")
+            log("  Extended diagnostic session active")
         else:
-            messages.append(f"Extended session: {session_result.message}")
-            # Try default session
-            self.uds.start_diagnostic_session(
-                req_id, res_id, DiagnosticSession.DEFAULT
+            log(f"  Extended session not available ({session_result.message})")
+            log("  Proceeding in default session")
+
+        dtc_result = self.uds.read_dtcs(req_id, res_id)
+        protection_dtcs = []
+        other_dtcs = []
+
+        if dtc_result.success:
+            for dtc in dtc_result.dtcs:
+                # U1000 = solid state driver protection activated
+                # U3000 = control module - often accompanies U1000
+                if dtc.code.startswith("U1") or dtc.code.startswith("U3"):
+                    protection_dtcs.append(dtc)
+                else:
+                    other_dtcs.append(dtc)
+
+            log(f"  Total DTCs: {len(dtc_result.dtcs)}")
+            if protection_dtcs:
+                log(f"  Protection-related DTCs ({len(protection_dtcs)}):")
+                for dtc in protection_dtcs:
+                    log(f"    {dtc.code} [{dtc.status_text}] "
+                        f"(raw: {dtc.raw_bytes.hex().upper()}, status: 0x{dtc.status:02X})")
+            else:
+                log("  No protection-related DTCs (U1xxx/U3xxx) found")
+            if other_dtcs:
+                log(f"  Other DTCs ({len(other_dtcs)}):")
+                for dtc in other_dtcs:
+                    log(f"    {dtc.code} [{dtc.status_text}] "
+                        f"(raw: {dtc.raw_bytes.hex().upper()}, status: 0x{dtc.status:02X})")
+        else:
+            log(f"  Could not read DTCs: {dtc_result.message}")
+            if dtc_result.raw_response:
+                log(f"  Raw response: {dtc_result.raw_response.hex().upper()}")
+
+        # --- Step 4: Assessment ---
+        log(f"[4/5] Assessment:")
+        if not protection_dtcs:
+            log("  No U1000/U3000 protection DTCs found.")
+            log("  The protected output issue may have already been resolved,")
+            log("  or the BCM may store the protection state separately from DTCs.")
+            log("")
+            log("  Options:")
+            log("  - Try cycling ignition OFF for 60 seconds, then back ON")
+            log("  - Disconnect battery for 60 seconds (forces full BCM reboot)")
+            log("  - If output still disabled, JLR SDD/Pathfinder is needed")
+            return DiagResult(
+                success=True,
+                message="\n".join(log_lines),
+                dtcs=dtc_result.dtcs if dtc_result.success else []
             )
 
-        # Step 3: Clear all DTCs first
-        if progress_callback:
-            progress_callback("Clear DTCs", 2, 5)
+        log("  Protection DTCs are present.")
+        log("  A standard DTC clear (service 0x14) will be attempted.")
+        log("  NOTE: This clears the fault code but may NOT re-enable the")
+        log("  protected output. If the output remains disabled after clearing")
+        log("  and cycling ignition, a specific Routine Control command is needed.")
+        log("  That routine ID must come from JLR documentation or an SDD capture.")
+
+        # --- Step 5: Clear DTCs and re-scan ---
+        log(f"[5/5] Clearing DTCs and re-scanning...")
+
+        # Keep session alive
+        self.uds.tester_present(req_id, res_id)
+
         clear_result = self.uds.clear_dtcs(req_id, res_id)
         if clear_result.success:
-            messages.append("DTCs cleared")
+            log("  DTC clear command accepted (positive response)")
         else:
-            messages.append(f"DTC clear: {clear_result.message}")
+            log(f"  DTC clear response: {clear_result.message}")
+            if clear_result.raw_response:
+                log(f"  Raw: {clear_result.raw_response.hex().upper()}")
 
-        # Step 4: Try routine control with known JLR routine IDs for FET reset
-        # These are commonly used routine identifiers for protected output reset
-        # on JLR platforms. The exact ID varies by BCM software version.
-        if progress_callback:
-            progress_callback("Routine", 3, 5)
-        
-        known_routine_ids = [
-            0x0203,  # Reset Protected Outputs (common on L494/L405)
-            0x0204,  # Reset All Output Drivers
-            0x0F06,  # Clear DM Lock (seen in JLR/BMW shared platforms)
-            0xFF00,  # General reset routine
-            0x0200,  # Output driver reset
-        ]
-        
-        routine_success = False
-        for routine_id in known_routine_ids:
-            result = self.uds.routine_control(
-                req_id, res_id,
-                sub_function=0x01,  # Start routine
-                routine_id=routine_id,
-            )
-            if result.success:
-                messages.append(
-                    f"Routine 0x{routine_id:04X} executed successfully"
-                )
-                routine_success = True
-                break
-            # If "request out of range" just try next one
-            # If "security access denied" we note it and move on
+        # Wait a moment, then re-scan
+        time.sleep(2)
+        self.uds.tester_present(req_id, res_id)
 
-        if not routine_success:
-            messages.append("No known routine IDs accepted (this is common)")
-            messages.append("Attempting ECU reset as alternative...")
-
-        # Step 5: ECU soft reset to force re-initialization of outputs
-        if progress_callback:
-            progress_callback("Reset", 4, 5)
-        
-        # Re-establish session after routine attempts
-        self.uds.start_diagnostic_session(
-            req_id, res_id, DiagnosticSession.EXTENDED
-        )
-        
-        reset_result = self.uds.ecu_reset(req_id, res_id, reset_type=0x03)  # Soft reset
-        if reset_result.success:
-            messages.append("BCM soft reset sent")
-        else:
-            messages.append(f"Soft reset: {reset_result.message}")
-            # Try hard reset
-            reset_result = self.uds.ecu_reset(req_id, res_id, reset_type=0x01)
-            if reset_result.success:
-                messages.append("BCM hard reset sent")
+        log("  Re-scanning BCM for DTCs...")
+        rescan_result = self.uds.read_dtcs(req_id, res_id)
+        if rescan_result.success:
+            rescan_protection = [d for d in rescan_result.dtcs
+                                 if d.code.startswith("U1") or d.code.startswith("U3")]
+            if rescan_protection:
+                log(f"  Protection DTCs STILL PRESENT after clear ({len(rescan_protection)}):")
+                for dtc in rescan_protection:
+                    log(f"    {dtc.code} [{dtc.status_text}]")
+                log("")
+                log("  CONCLUSION: Standard DTC clear did not resolve the protection.")
+                log("  The BCM is actively maintaining the protected state.")
+                log("  Next steps:")
+                log("  - Verify the wiring fault is actually repaired")
+                log("  - Try: ignition OFF 60s, then ON, then re-scan")
+                log("  - Try: battery disconnect for 60s (full BCM reboot)")
+                log("  - If still present: a Routine Control (0x31) with the correct")
+                log("    routine ID is required. Capture this from JLR SDD/Pathfinder")
+                log("    or provide it manually via this tool's routine execute function.")
             else:
-                messages.append(f"Hard reset: {reset_result.message}")
+                log("  Protection DTCs cleared successfully!")
+                log("  Remaining DTCs after clear:")
+                if rescan_result.dtcs:
+                    for dtc in rescan_result.dtcs:
+                        log(f"    {dtc.code} [{dtc.status_text}]")
+                else:
+                    log("    None")
+                log("")
+                log("  NEXT: Turn ignition OFF, wait 30 seconds, turn ON.")
+                log("  Check if the affected output (lamp/signal) is working.")
+                log("  If the fault returns on next scan, the wiring issue persists.")
+        else:
+            log(f"  Re-scan failed: {rescan_result.message}")
 
-        # Summary
-        overall_success = clear_result.success or routine_success or reset_result.success
-        summary = "\n".join(f"  - {m}" for m in messages)
+        overall_success = clear_result.success
+        return DiagResult(
+            success=overall_success,
+            message="\n".join(log_lines),
+            dtcs=rescan_result.dtcs if rescan_result.success else protection_dtcs
+        )
+
+    def execute_known_routine(self, module_name: str, routine_id: int,
+                              sub_function: int = 0x01,
+                              option_record: bytes = b"",
+                              require_session: bool = True) -> DiagResult:
+        """
+        Execute a KNOWN routine ID on a module.
         
-        if overall_success:
-            final_msg = (
-                f"BCM reset procedure completed:\n{summary}\n\n"
-                f"  Turn ignition OFF, wait 30 seconds, then turn ON again.\n"
-                f"  Check if the affected output (turn signal/lamp) is restored.\n"
-                f"  If the fault returns immediately, the wiring issue persists."
+        Use this ONLY when you have the correct routine ID from JLR documentation,
+        an SDD/Pathfinder CAN capture, or other verified source.
+        
+        Args:
+            module_name: Short name of the target module (e.g., "BCM").
+            routine_id: The verified 2-byte routine identifier.
+            sub_function: 0x01=Start, 0x02=Stop, 0x03=RequestResults.
+            option_record: Optional routine parameter bytes.
+            require_session: Whether to enter extended session first.
+            
+        Returns:
+            DiagResult with full response details.
+        """
+        from modules import get_module_by_name
+        module = get_module_by_name(module_name)
+        if not module:
+            return DiagResult(success=False,
+                              message=f"Unknown module: {module_name}")
+
+        req_id = module.request_id
+        res_id = module.response_id
+
+        # Verify module responds
+        if not self.uds.ping_module(req_id, res_id):
+            return DiagResult(success=False, message=f"{module_name} not responding")
+
+        # Start session if required
+        if require_session:
+            self.uds.start_diagnostic_session(
+                req_id, res_id, DiagnosticSession.EXTENDED
+            )
+            self.uds.tester_present(req_id, res_id)
+
+        # Execute routine
+        result = self.uds.routine_control(
+            req_id, res_id,
+            sub_function=sub_function,
+            routine_id=routine_id,
+            option_record=option_record,
+        )
+
+        # Add context to the message
+        if result.success:
+            result.message = (
+                f"Routine 0x{routine_id:04X} executed on {module_name}\n"
+                f"  Response: {result.raw_response.hex().upper()}"
             )
         else:
-            final_msg = (
-                f"BCM reset procedure attempted but may not have succeeded:\n{summary}\n\n"
-                f"  Try: Turn ignition OFF, disconnect battery for 60 seconds,\n"
-                f"  reconnect, and cycle ignition. This forces a full BCM reboot.\n"
-                f"  If that fails, JLR SDD/Pathfinder is needed for the specific\n"
-                f"  protected output reset routine."
+            result.message = (
+                f"Routine 0x{routine_id:04X} on {module_name}: {result.message}\n"
+                f"  Raw response: {result.raw_response.hex().upper() if result.raw_response else 'none'}"
             )
 
-        return DiagResult(success=overall_success, message=final_msg)
+        return result

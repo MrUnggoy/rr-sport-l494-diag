@@ -576,9 +576,12 @@ class UDSClient:
         response = self._send(request_id, response_id, data, timeout=5.0)
 
         if response is None:
-            # Some ECUs reset immediately without responding
-            return DiagResult(success=True,
-                              message="Reset sent (no response - ECU may have restarted)")
+            # No response after reset command — ambiguous. The ECU may have
+            # restarted (normal) or communication may have failed (problem).
+            # We do NOT treat this as confirmed success.
+            return DiagResult(success=False,
+                              message="No response after reset command "
+                                      "(ECU may have restarted, or communication failed)")
 
         if self._is_positive_response(UDSService.ECU_RESET, response):
             return DiagResult(success=True, message="ECU reset successful",

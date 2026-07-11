@@ -88,22 +88,36 @@ python main.py --list-ports
 - **Clearing codes does not fix underlying problems.** If a fault returns after clearing,
   the root cause needs to be addressed.
 
-## BCM Protected Output Reset (U1000 / U3000)
+## BCM Protected Output Diagnostic (U1000 / U3000)
 
 The BCM uses FET (solid-state) drivers for lighting circuits. When it detects overcurrent
 (e.g., a short in a taillight), it disables that output and sets U1000 ("Solid State Driver
 Protection Activated"). A standard DTC clear alone may not re-enable the output.
 
-Menu option 7 performs a multi-step reset procedure:
+Menu option 7 performs an **honest diagnostic procedure** — it does NOT blindly fire
+guessed routine IDs at the BCM. Instead:
 
-1. Opens an extended diagnostic session with the BCM
-2. Clears all stored DTCs
-3. Attempts UDS Routine Control (0x31) with known JLR routine IDs
-4. Sends an ECU soft reset to force output driver re-initialization
-5. Falls back to hard reset if needed
+1. Verifies BCM communication and identifies it (part number / software)
+2. Reads all BCM DTCs and identifies protection-related codes (U1xxx/U3xxx)
+3. Performs a standard DTC clear (service 0x14) — clearly labeled as such
+4. Re-scans the BCM to check if the protection fault returns immediately
+5. Reports findings and recommends next steps
 
-**Before running this**: fix the underlying wiring fault. If the short still exists,
-the output will trip again immediately.
+**If a standard clear does not resolve the issue**, the protected output requires a
+specific Routine Control (service 0x31) command with the correct routine ID for your
+BCM software version. This ID must come from:
+- JLR service documentation
+- A captured SDD/Pathfinder CAN session
+- Community-verified data for your specific BCM part number
+
+Once you have the correct routine ID, menu option 8 lets you execute it directly.
+
+### What this tool will NOT do
+
+- Guess routine IDs and fire them at the BCM
+- Treat a timeout or "no response" as success
+- Claim a DTC clear equals a protected output reset
+- Send ECU reset commands as a speculative workaround
 
 ## License
 

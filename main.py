@@ -246,34 +246,86 @@ def action_module_info(scanner: DiagnosticScanner):
 
 
 def action_bcm_reset_protected(scanner: DiagnosticScanner):
-    """Reset BCM protected outputs (FET/solid-state driver reset)."""
-    print(f"\n  {Style.BRIGHT}BCM Protected Output Reset{Style.RESET_ALL}")
-    print(f"  {'─'*40}")
-    print(f"  This attempts to re-enable BCM outputs that were shut down")
-    print(f"  due to overcurrent detection (U1000 / U3000 fault codes).")
-    print(f"  Common for: turn signals, headlamps, tail lamps, fog lamps.")
+    """BCM protected output diagnostic and DTC clear."""
+    print(f"\n  {Style.BRIGHT}BCM Protected Output Diagnostic{Style.RESET_ALL}")
+    print(f"  {'─'*45}")
+    print(f"  This investigates BCM protection faults (U1000/U3000) and")
+    print(f"  attempts a standard DTC clear. It does NOT blindly send")
+    print(f"  routine control commands — those require a verified routine ID.")
     print()
-    print_warning("IMPORTANT: Fix the wiring fault FIRST!")
-    print_warning("If a short circuit still exists, the output will")
-    print_warning("trip again immediately after reset.")
+    print(f"  The procedure will:")
+    print(f"    1. Verify BCM communication")
+    print(f"    2. Read BCM part number / software version")
+    print(f"    3. Read all BCM DTCs")
+    print(f"    4. Clear DTCs (standard service 0x14)")
+    print(f"    5. Re-scan to check if protection faults return")
     print()
-    print_warning("Ensure: Ignition ON, Engine OFF")
-    confirm = input(f"  Proceed with BCM reset? (y/n): ").strip().lower()
+    print_warning("If the underlying short circuit is not fixed, the fault")
+    print_warning("will return immediately after clearing.")
+    print()
+    confirm = input(f"  Proceed? (y/n): ").strip().lower()
 
     if confirm != 'y':
         print_info("Cancelled")
         return
 
     print()
-    result = scanner.reset_bcm_protected_outputs(progress_callback=progress_dot)
-    print("\r" + " " * 50 + "\r")
+
+    def log_line(msg):
+        print(f"  {msg}")
+
+    result = scanner.bcm_protected_output_diagnostic(log_callback=log_line)
 
     print_separator()
     if result.success:
-        print_success("Procedure completed")
+        print_success("Diagnostic procedure completed")
     else:
-        print_warning("Procedure completed with issues")
-    print(f"\n{result.message}")
+        print_error("Procedure could not complete fully")
+    print_separator()
+
+
+def action_execute_routine(scanner: DiagnosticScanner):
+    """Execute a known routine ID on a module (advanced)."""
+    print(f"\n  {Style.BRIGHT}Execute Known Routine (Advanced){Style.RESET_ALL}")
+    print(f"  {'─'*45}")
+    print_warning("Only use this if you have a VERIFIED routine ID from")
+    print_warning("JLR documentation or a captured SDD/Pathfinder session.")
+    print()
+    print(f"  Available modules: {', '.join(get_all_module_names())}")
+    name = input(f"\n  Module name: ").strip()
+
+    module = get_module_by_name(name)
+    if not module:
+        print_error(f"Unknown module '{name}'")
+        return
+
+    routine_hex = input(f"  Routine ID (hex, e.g. 0203): ").strip()
+    try:
+        routine_id = int(routine_hex, 16)
+    except ValueError:
+        print_error("Invalid hex value")
+        return
+
+    print()
+    print_info(f"Module: {module.short_name} ({module.description})")
+    print_info(f"Routine: 0x{routine_id:04X}")
+    print_info(f"Sub-function: 0x01 (Start Routine)")
+    print()
+    confirm = input(f"  Send this routine? (y/n): ").strip().lower()
+    if confirm != 'y':
+        print_info("Cancelled")
+        return
+
+    result = scanner.execute_known_routine(
+        module_name=module.short_name,
+        routine_id=routine_id,
+    )
+
+    print_separator()
+    if result.success:
+        print_success(result.message)
+    else:
+        print_error(result.message)
     print_separator()
 
 
@@ -289,11 +341,12 @@ def main_menu(scanner: DiagnosticScanner):
         print(f"  4. Clear faults on specific module")
         print(f"  5. Clear ALL faults (all modules)")
         print(f"  6. Read module info (part number/software)")
-        print(f"  7. {Fore.YELLOW}BCM Reset Protected Outputs{Style.RESET_ALL} (turn signal/lamp fix)")
+        print(f"  7. {Fore.YELLOW}BCM Protected Output Diagnostic{Style.RESET_ALL} (U1000/U3000)")
+        print(f"  8. Execute known routine (advanced)")
         print(f"  0. Exit")
         print()
 
-        choice = input(f"  Select [{Fore.CYAN}0-7{Style.RESET_ALL}]: ").strip()
+        choice = input(f"  Select [{Fore.CYAN}0-8{Style.RESET_ALL}]: ").strip()
 
         try:
             if choice == "1":
@@ -310,6 +363,8 @@ def main_menu(scanner: DiagnosticScanner):
                 action_module_info(scanner)
             elif choice == "7":
                 action_bcm_reset_protected(scanner)
+            elif choice == "8":
+                action_execute_routine(scanner)
             elif choice == "0":
                 break
             else:
