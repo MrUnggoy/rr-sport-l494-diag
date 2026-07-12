@@ -315,8 +315,8 @@ class DiagnosticScanner:
                 if _is_protection_dtc(dtc.code):
                     has_u1000 = True
             if not has_u1000:
-                log("  WARNING: No U1xxx protection DTC found.")
-                log("  The routine may still work, but the output may already be enabled.")
+                log("  NOTE: No known protection DTC pattern found.")
+                log("  Proceeding with routine anyway (0x205E re-enables all outputs).")
         else:
             log(f"  Could not read DTCs: {dtc_result.message}")
             log("  Proceeding anyway...")
