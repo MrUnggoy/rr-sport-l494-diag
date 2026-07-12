@@ -8,6 +8,30 @@ and presenting results in a structured way.
 from dataclasses import dataclass, field
 
 from elm327 import ELM327
+
+
+def _is_protection_dtc(code: str) -> bool:
+    """
+    Check if a DTC code is related to BCM solid-state driver protection.
+    
+    Known protection codes:
+    - U1000-00: "Solid State Driver Protection Active - Driver Disabled" (newer models)
+    - U3000-xx: Control module internal fault (often accompanies U1000)
+    - B108E: Short circuit protection on specific output (2014 L494)
+    - B1xxx: Body system short circuit codes (suffixes -11, -12, -14, -15)
+    """
+    if not code:
+        return False
+    # U1000 / U1xxx / U3xxx (newer platforms)
+    if code.startswith("U1") or code.startswith("U3"):
+        return True
+    # B108E specifically (your 2014 L494)
+    if "108E" in code.upper():
+        return True
+    # B1xxx codes with short-circuit related patterns
+    if code.startswith("B1"):
+        return True
+    return False
 from modules import ECUModule, MODULES
 from uds import UDSClient, DiagResult, DTC, DiagnosticSession
 
@@ -286,9 +310,9 @@ class DiagnosticScanner:
         if dtc_result.success:
             log(f"  Found {len(dtc_result.dtcs)} DTC(s):")
             for dtc in dtc_result.dtcs:
-                marker = " ← TARGET" if dtc.code.startswith("U1") else ""
+                marker = " ← TARGET" if _is_protection_dtc(dtc.code) else ""
                 log(f"    {dtc.code} [{dtc.status_text}]{marker}")
-                if dtc.code.startswith("U1"):
+                if _is_protection_dtc(dtc.code):
                     has_u1000 = True
             if not has_u1000:
                 log("  WARNING: No U1xxx protection DTC found.")
@@ -409,9 +433,9 @@ class DiagnosticScanner:
 
         rescan_result = self.uds.read_dtcs(req_id, res_id)
         if rescan_result.success:
-            u1_codes = [d for d in rescan_result.dtcs if d.code.startswith("U1")]
+            u1_codes = [d for d in rescan_result.dtcs if _is_protection_dtc(d.code)]
             if u1_codes:
-                log(f"  U1xxx DTCs still present ({len(u1_codes)}):")
+                log(f"  Protection DTCs still present ({len(u1_codes)}):")
                 for dtc in u1_codes:
                     log(f"    {dtc.code} [{dtc.status_text}]")
                 log("")
@@ -515,9 +539,8 @@ class DiagnosticScanner:
 
         if dtc_result.success:
             for dtc in dtc_result.dtcs:
-                # U1000 = solid state driver protection activated
-                # U3000 = control module - often accompanies U1000
-                if dtc.code.startswith("U1") or dtc.code.startswith("U3"):
+                # Protection-related DTCs: U1000, U3000, B108E, B1xxx
+                if _is_protection_dtc(dtc.code):
                     protection_dtcs.append(dtc)
                 else:
                     other_dtcs.append(dtc)
@@ -586,7 +609,7 @@ class DiagnosticScanner:
         rescan_result = self.uds.read_dtcs(req_id, res_id)
         if rescan_result.success:
             rescan_protection = [d for d in rescan_result.dtcs
-                                 if d.code.startswith("U1") or d.code.startswith("U3")]
+                                 if _is_protection_dtc(d.code)]
             if rescan_protection:
                 log(f"  Protection DTCs STILL PRESENT after clear ({len(rescan_protection)}):")
                 for dtc in rescan_protection:
