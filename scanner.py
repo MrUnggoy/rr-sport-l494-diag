@@ -298,7 +298,7 @@ class DiagnosticScanner:
             log("  Proceeding anyway...")
 
         # Step 4: Start extended diagnostic session
-        log("[4/6] Starting extended diagnostic session...")
+        log("[4/7] Starting extended diagnostic session...")
         self.uds.tester_present(req_id, res_id)
         session_result = self.uds.start_diagnostic_session(
             req_id, res_id, DiagnosticSession.EXTENDED
@@ -309,8 +309,8 @@ class DiagnosticScanner:
             log(f"  Session response: {session_result.message}")
             log("  Attempting routine anyway...")
 
-        # Step 5: Execute Enable Protected Outputs (0x205E)
-        log("[5/6] Executing routine 0x205E (Enable Protected Outputs)...")
+        # Step 5: Security Access (if required)
+        log("[5/7] Attempting routine 0x205E (Enable Protected Outputs)...")
         self.uds.tester_present(req_id, res_id)
 
         routine_result = self.uds.routine_control(
@@ -318,6 +318,64 @@ class DiagnosticScanner:
             sub_function=0x01,  # Start Routine
             routine_id=self.BCM_ENABLE_PROTECTED_OUTPUTS_ROUTINE,
         )
+
+        # If routine was rejected with Security Access Denied, try unlocking
+        if not routine_result.success and routine_result.raw_response:
+            is_neg = (len(routine_result.raw_response) >= 3 and
+                      routine_result.raw_response[0] == 0x7F)
+            nrc = routine_result.raw_response[2] if is_neg else 0
+
+            if nrc == 0x33:  # Security Access Denied
+                log("  Routine requires security access - attempting unlock...")
+                from security import compute_security_key, get_bcm_key
+
+                bcm_key = get_bcm_key(0x01)
+                if not bcm_key:
+                    log("  ERROR: No BCM security key available")
+                    return DiagResult(success=False,
+                                      message="\n".join(log_lines))
+
+                # Request seed
+                seed_result = self.uds.security_access_request_seed(
+                    req_id, res_id, access_level=0x01
+                )
+                if not seed_result.success:
+                    log(f"  Seed request failed: {seed_result.message}")
+                    return DiagResult(success=False,
+                                      message="\n".join(log_lines))
+
+                # Check if already unlocked (seed = 0)
+                if "Already unlocked" in seed_result.message:
+                    log("  BCM already unlocked (seed=0)")
+                else:
+                    # Extract seed bytes and compute key
+                    seed_bytes = seed_result.raw_response[2:]  # After 67 01
+                    log(f"  Seed received: {seed_bytes.hex().upper()}")
+
+                    computed_key = compute_security_key(seed_bytes, bcm_key)
+                    log(f"  Key computed:  {computed_key.hex().upper()}")
+
+                    # Send key
+                    key_result = self.uds.security_access_send_key(
+                        req_id, res_id, access_level=0x02, key=computed_key
+                    )
+                    if key_result.success:
+                        log("  Security access GRANTED!")
+                    else:
+                        log(f"  Security access FAILED: {key_result.message}")
+                        log("  The key 'COLIN' may not be correct for this BCM version.")
+                        log("  Try security level 0x03 or 0x11 if available.")
+                        return DiagResult(success=False,
+                                          message="\n".join(log_lines))
+
+                # Retry the routine now that we're unlocked
+                log("  Retrying routine 0x205E after security unlock...")
+                self.uds.tester_present(req_id, res_id)
+                routine_result = self.uds.routine_control(
+                    req_id, res_id,
+                    sub_function=0x01,
+                    routine_id=self.BCM_ENABLE_PROTECTED_OUTPUTS_ROUTINE,
+                )
 
         if routine_result.success:
             log(f"  SUCCESS - Routine accepted!")
